@@ -9,3 +9,5 @@ large-v3-support/
 __pycache__/
 *.pyc
 *.pyo
+.env
+.env.example

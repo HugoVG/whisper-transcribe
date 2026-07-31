@@ -79,11 +79,16 @@ def _run_pyannote(
                 pass
 
     from pyannote.audio import Pipeline
+    import torchaudio
 
     if hf_token:
         os.environ["HF_TOKEN"] = hf_token
-    pipeline = Pipeline.from_pretrained(model_name, use_auth_token=hf_token)
+    pipeline = Pipeline.from_pretrained(model_name, token=hf_token)
     pipeline.to(torch.device("cuda"))
+
+    # Preload audio in-memory to bypass torchcodec dependency
+    waveform, sample_rate = torchaudio.load(str(audio_path))
+    audio_dict = {"waveform": waveform, "sample_rate": sample_rate}
 
     kwargs = {}
     if min_speakers is not None:
@@ -91,15 +96,24 @@ def _run_pyannote(
     if max_speakers is not None:
         kwargs["max_speakers"] = max_speakers
 
-    diarization = pipeline(str(audio_path), **kwargs)
+    diarization = pipeline(audio_dict, **kwargs)
 
     turns = []
-    for turn, _, speaker in diarization.itertracks(yield_label=True):
-        turns.append({
-            "start": turn.start,
-            "end": turn.end,
-            "speaker": speaker,
-        })
+    # pyannote >= 4.x uses DiarizeOutput with .speaker_diarization
+    if hasattr(diarization, 'speaker_diarization'):
+        for turn, _, speaker in diarization.speaker_diarization.itertracks(yield_label=True):
+            turns.append({
+                "start": turn.start,
+                "end": turn.end,
+                "speaker": speaker,
+            })
+    else:
+        for turn, _, speaker in diarization.itertracks(yield_label=True):
+            turns.append({
+                "start": turn.start,
+                "end": turn.end,
+                "speaker": speaker,
+            })
     return turns
 
 

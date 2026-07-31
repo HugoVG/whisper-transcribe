@@ -1,52 +1,54 @@
 # Multi-stage build: builder pre-bakes models, runtime is lean
 # Build: docker build -t whisper-transcribe:2.0 .
 # Slim:  docker build --build-arg PREBAKE_ALL=0 -t whisper-transcribe:2.0-slim .
+#
+# Requires NVIDIA driver >= 570 for Blackwell (RTX 50xx) GPUs.
 
-ARG BASE_IMAGE=nvidia/cuda:12.4.0-runtime-ubuntu22.04
+ARG BASE_IMAGE=nvidia/cuda:12.8.0-runtime-ubuntu22.04
 
 # ---- Builder stage ----
 FROM ${BASE_IMAGE} AS builder
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
+ENV PIP_NO_CACHE_DIR=1
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 python3-pip python3-dev \
     ffmpeg git build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# Pin all dependencies
-RUN pip3 install --no-cache-dir \
-    torch==2.5.1 \
-    torchaudio==2.5.1 \
-    -f https://download.pytorch.org/whl/torch_stable.html || \
-    pip3 install --no-cache-dir torch==2.5.1 torchaudio==2.5.1
+# PyTorch nightly for Blackwell sm_120 support (stable 2.9 not yet released)
+# Switch to --index-url https://download.pytorch.org/whl/cu128 once PyTorch 2.9 stable ships
+RUN pip3 install --no-cache-dir --pre \
+    torch torchaudio \
+    --index-url https://download.pytorch.org/whl/nightly/cu128
 
-# cuDNN for ctranslate2/pyannote (not included in runtime image)
+# cuDNN 9 for CUDA 12.8 — let PyTorch's bundled libs handle it
 RUN pip3 install --no-cache-dir nvidia-cudnn-cu12==9.* && \
-    ln -sf /usr/local/lib/python3.10/dist-packages/nvidia/cudnn/lib/libcudnn*.so* /usr/local/lib/ || true
+    find /usr/local/lib/python3.10/dist-packages/nvidia/cudnn/lib -name "libcudnn*.so*" \
+      -exec ln -sf {} /usr/local/lib/ \; 2>/dev/null || true
 
+# Unpinned for Blackwell compatibility — pip resolves latest compatible versions
 RUN pip3 install --no-cache-dir \
-    ctranslate2==4.4.0 \
-    faster-whisper==1.1.1 \
-    whisperx==3.4.2 \
-    pyannote.audio==3.4.0 \
-    huggingface_hub==0.30.2 \
-    soundfile \
-    numpy \
-    scipy \
-    matplotlib \
+    ctranslate2 \
+    faster-whisper \
+    whisperx \
+    pyannote.audio \
+    huggingface_hub \
+    hf_xet \
+    soundfile numpy scipy matplotlib \
     loguru appdirs sympy unidecode \
-    progressbar2 librosa timm torchlibrosa && \
-    pip3 install --no-cache-dir --no-deps audiosr deepfilternet==0.5.6
+    progressbar2 librosa timm torchlibrosa \
+    fastapi "uvicorn[standard]" python-multipart && \
+    pip3 install --no-cache-dir --no-deps audiosr deepfilternet
 
-# Pre-bake models (optional, controlled by PREBAKE_ALL)
+# Pre-bake models
 ARG PREBAKE_ALL=1
 ENV PREBAKE_ALL=${PREBAKE_ALL}
 ARG HF_TOKEN=""
 ENV HF_TOKEN=${HF_TOKEN}
 
-# Download large-v3 model
 RUN python3 <<'PYEOF'
 import os
 from huggingface_hub import hf_hub_download, list_repo_files
@@ -59,9 +61,8 @@ for f in list_repo_files('Systran/faster-whisper-large-v3'):
 print('large-v3 downloaded.')
 PYEOF
 
-# Convert Dutch model (pre-bake only)
 RUN if [ "$PREBAKE_ALL" = "1" ]; then \
-    python3 -c "from faster_whisper import WhisperModel; print('Downloading Dutch whisper-large-v3-dutch for conversion...')" && \
+    python3 -c "from faster_whisper import WhisperModel; print('Downloading Dutch model...')" && \
     ct2-transformers-converter \
         --model golesheed/whisper-large-v3-dutch \
         --output_dir /opt/whisper-models/nl-large-v3 \
@@ -70,7 +71,6 @@ RUN if [ "$PREBAKE_ALL" = "1" ]; then \
     echo "Dutch model conversion skipped (may need HF auth)"; \
     fi
 
-# Pre-download alignment models
 RUN python3 <<'PYEOF'
 import os
 if os.environ.get('PREBAKE_ALL', '1') != '1':
@@ -94,47 +94,39 @@ ENV PYTHONPATH=/opt
 ENV LD_LIBRARY_PATH=/usr/local/lib/python3.10/dist-packages/nvidia/cublas/lib:/usr/local/lib/python3.10/dist-packages/nvidia/cudnn/lib:/usr/local/lib/x86_64-linux-gnu:/usr/local/lib
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3 python3-pip \
-    ffmpeg git \
+    python3 python3-pip ffmpeg git \
     && rm -rf /var/lib/apt/lists/*
 
-# Pin runtime deps (no build tools)
-RUN pip3 install --no-cache-dir \
-    torch==2.5.1 \
-    torchaudio==2.5.1 \
-    -f https://download.pytorch.org/whl/torch_stable.html || \
-    pip3 install --no-cache-dir torch==2.5.1 torchaudio==2.5.1
+RUN pip3 install --no-cache-dir --pre \
+    torch torchaudio \
+    --index-url https://download.pytorch.org/whl/nightly/cu128
 
-# cuDNN for ctranslate2/pyannote
 RUN pip3 install --no-cache-dir nvidia-cudnn-cu12==9.* && \
-    ln -sf /usr/local/lib/python3.10/dist-packages/nvidia/cudnn/lib/libcudnn*.so* /usr/local/lib/ || true
+    find /usr/local/lib/python3.10/dist-packages/nvidia/cudnn/lib -name "libcudnn*.so*" \
+      -exec ln -sf {} /usr/local/lib/ \; 2>/dev/null || true
 
 RUN pip3 install --no-cache-dir \
-    ctranslate2==4.4.0 \
-    faster-whisper==1.1.1 \
-    whisperx==3.4.2 \
-    pyannote.audio==3.4.0 \
-    huggingface_hub==0.30.2 \
-    soundfile \
-    numpy \
-    scipy \
-    matplotlib \
+    ctranslate2 \
+    faster-whisper \
+    whisperx \
+    pyannote.audio \
+    huggingface_hub \
+    hf_xet \
+    fastapi "uvicorn[standard]" python-multipart \
+    soundfile numpy scipy matplotlib \
     loguru appdirs sympy unidecode \
     progressbar2 librosa timm torchlibrosa && \
-    pip3 install --no-cache-dir --no-deps audiosr deepfilternet==0.5.6
+    pip3 install --no-cache-dir --no-deps audiosr deepfilternet
 
-# Copy pre-baked models from builder
 COPY --from=builder /opt/whisper-models /opt/whisper-models
-
-# Copy pipeline code
 COPY pipeline/ /opt/pipeline/
 
 ENV WHISPER_MODEL_DIR=/opt/whisper-models
 
-# Smoke test
 RUN python3 -c "import faster_whisper, whisperx, torch, pyannote.audio; print('imports ok')"
 
 WORKDIR /audio
+EXPOSE 8000
 
 ENTRYPOINT ["python3", "-m"]
-CMD ["pipeline.glossary", "--dump"]
+CMD ["uvicorn", "pipeline.api_server:app", "--host", "0.0.0.0", "--port", "8000"]

@@ -126,6 +126,7 @@ for i, seg in enumerate(result.get("segments", [])):
 
 output = {{
     "engine": engine_label,
+    "language": top_lang,
     "language_chunks": lang_chunks,
     "segments": segments_out,
 }}
@@ -139,7 +140,8 @@ print(f"Wrote {{len(segments_out)}} segments to {{output_path}}")
     )
     if proc.returncode != 0:
         print(f"Engine {engine_label} stderr: {proc.stderr}", file=sys.stderr)
-        raise RuntimeError(f"Engine {engine_label} failed: {proc.stderr[:500]}")
+        # Show last 2000 chars of stderr (actual error is at the end, warnings at top)
+        raise RuntimeError(f"Engine {engine_label} failed: {proc.stderr[-2000:]}")
 
     return json.loads(output_json.read_text())
 

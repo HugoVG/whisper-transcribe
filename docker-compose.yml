@@ -1,0 +1,52 @@
+# Whisper Transcribe API + Ollama
+# Start:  docker compose up -d
+# Build:  docker compose build
+#
+# Ollama runs on the host (Windows/Linux), the container reaches it via
+# host.docker.internal. If running Ollama inside this compose file, set
+# OLLAMA_BASE_URL=http://ollama:11434 and uncomment the ollama service.
+
+services:
+  whisper:
+    build: .
+    image: whisper-transcribe:2.0
+    container_name: whisper-transcribe
+    ports:
+      - "8000:8000"
+    environment:
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      - HF_TOKEN=${HF_TOKEN:-}
+      - TRANSCRIBE_API_WORKDIR=/tmp/whisper-transcribe-api
+    volumes:
+      - whisper-hf-cache:/root/.cache/huggingface
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+
+  # Optional: run Ollama in the compose stack instead of on the host.
+  # Uncomment and set OLLAMA_BASE_URL=http://ollama:11434 above.
+  #
+  # ollama:
+  #   image: ollama/ollama:latest
+  #   container_name: ollama
+  #   ports:
+  #     - "11434:11434"
+  #   volumes:
+  #     - ollama-data:/root/.ollama
+  #   deploy:
+  #     resources:
+  #       reservations:
+  #         devices:
+  #           - driver: nvidia
+  #             count: 1
+  #             capabilities: [gpu]
+  #   restart: unless-stopped
+
+volumes:
+  whisper-hf-cache:
+  # ollama-data:
