@@ -91,9 +91,7 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--speakers", type=int, help="Pin speaker count for diarization.")
     ap.add_argument("--glossary", type=Path, help="Path to glossary file.")
     ap.add_argument("--diarize-model", default="3.1", choices=["3.1", "community-1"], help="Pyannote diarization model.")
-    ap.add_argument("--ollama-model", "-o", help="Ollama model (legacy, use --llm-model).")
-    ap.add_argument("--ollama-base-url", default=LLM_BASE_URL, help="Ollama base URL (legacy, use --llm-base-url).")
-    ap.add_argument("--llm-model", help="LLM model name.")
+    ap.add_argument("--llm-model", help="LLM model name (e.g., gpt-4o, qwen2.5:14b).")
     ap.add_argument("--llm-base-url", help="OpenAI-compatible or Ollama base URL.")
     ap.add_argument("--llm-api-key", help="API key for OpenAI-compatible endpoints.")
     ap.add_argument("--keep-intermediates", action="store_true", help="Preserve scratch dir for debugging.")
@@ -210,12 +208,9 @@ def run_pipeline(args: argparse.Namespace) -> int:
     if args.no_ensemble: ensemble = False
     if args.no_correct: correct = False
 
-    ollama_model = args.ollama_model
-    ollama_base_url = args.ollama_base_url or LLM_BASE_URL
-    # New names take priority
-    effective_model = args.llm_model or ollama_model
-    effective_base_url = args.llm_base_url or ollama_base_url
-    effective_api_key = args.llm_api_key or None
+    llm_model = args.llm_model
+    llm_base_url = args.llm_base_url or LLM_BASE_URL
+    llm_api_key = args.llm_api_key or None
     language = args.language
     if language in (None, "", "auto"):
         language = None
@@ -242,7 +237,7 @@ def run_pipeline(args: argparse.Namespace) -> int:
         # ── Prompt building ──────────────────────────────────────────────────
         prompt_text_final = ""
         if args.auto_prompt:
-            client = create_client(effective_base_url, effective_model, effective_api_key)
+            client = create_client(llm_base_url, llm_model, llm_api_key)
             if not client.model:
                 print("Error: auto-prompt requires an LLM model.", file=sys.stderr)
                 return 1
@@ -321,9 +316,9 @@ def run_pipeline(args: argparse.Namespace) -> int:
                 rover_path, cleaned_json,
                 glossary_text=glossary_obj.to_prompt_block(),
                 language=(language or "nl"),
-                llm_base_url=effective_base_url,
-                llm_model=effective_model,
-                llm_api_key=effective_api_key,
+                llm_base_url=llm_base_url,
+                llm_model=llm_model,
+                llm_api_key=llm_api_key,
             )
             _log("Post-correction: done")
 
@@ -337,7 +332,7 @@ def run_pipeline(args: argparse.Namespace) -> int:
 
         # ── Summary ──────────────────────────────────────────────────────────
         if args.summary:
-            client = create_client(effective_base_url, effective_model, effective_api_key)
+            client = create_client(llm_base_url, llm_model, llm_api_key)
             if client.model:
                 print("--- Summary ---")
                 summary_text = _run_summary(verbatim_path, client)

@@ -14,7 +14,7 @@ services:
     ports:
       - "8000:8000"
     environment:
-      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      - LLM_BASE_URL=${LLM_BASE_URL:-http://host.docker.internal:11434}
       - HF_TOKEN=${HF_TOKEN:-}
       - TRANSCRIBE_API_WORKDIR=/tmp/whisper-transcribe-api
     volumes:

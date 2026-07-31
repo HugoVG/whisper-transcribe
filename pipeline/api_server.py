@@ -19,7 +19,7 @@ app = FastAPI(title="Whisper Transcribe API", version="1.0")
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 WORK_ROOT = Path(os.environ.get("TRANSCRIBE_API_WORKDIR", Path(tempfile.gettempdir()) / "whisper-transcribe-api"))
-DEFAULT_OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://host.docker.internal:11434")
+DEFAULT_LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "http://host.docker.internal:11434")
 
 
 @app.get("/health")
@@ -27,7 +27,7 @@ def health() -> dict:
     return {
         "ok": True,
         "work_root": str(WORK_ROOT),
-        "default_ollama_base_url": DEFAULT_OLLAMA_BASE_URL,
+        "llm_base_url": DEFAULT_LLM_BASE_URL,
     }
 
 
@@ -202,8 +202,6 @@ async def transcribe(
     speakers: int | None = Form(default=None),
     glossary_text: str | None = Form(default=None),
     diarize_model: str | None = Form(default=None),
-    ollama_model: str | None = Form(default=None),
-    ollama_base_url: str | None = Form(default=None),
     llm_model: str | None = Form(default=None),
     llm_base_url: str | None = Form(default=None),
     llm_api_key: str | None = Form(default=None),
@@ -255,15 +253,9 @@ async def transcribe(
     speakers = pick("speakers", speakers)
     glossary_text = pick("glossary_text", glossary_text)
     diarize_model = pick("diarize_model", diarize_model)
-    ollama_model = pick("ollama_model", ollama_model)
-    ollama_base_url = pick("ollama_base_url", ollama_base_url) or DEFAULT_OLLAMA_BASE_URL
     llm_model = pick("llm_model", llm_model)
-    llm_base_url = pick("llm_base_url", llm_base_url)
+    llm_base_url = pick("llm_base_url", llm_base_url) or DEFAULT_LLM_BASE_URL
     llm_api_key = pick("llm_api_key", llm_api_key)
-    # New names take priority, fall back to old ollama_ names
-    effective_model = llm_model or ollama_model
-    effective_base_url = llm_base_url or ollama_base_url
-    effective_api_key = llm_api_key or None
     keep_intermediates = bool(pick("keep_intermediates", keep_intermediates))
     output_format = pick("format", format)
 
@@ -314,7 +306,7 @@ async def transcribe(
 
         prompt_text_final = ""
         if auto_prompt:
-            client = create_client(effective_base_url, effective_model, effective_api_key)
+            client = create_client(llm_base_url, llm_model, llm_api_key)
             if not client.model:
                 raise RuntimeError("auto-prompt requested but no LLM model available")
 
@@ -424,15 +416,15 @@ async def transcribe(
                 rover_path, cleaned_json,
                 glossary_text=glossary_obj.to_prompt_block(),
                 language=(language or "nl"),
-                llm_base_url=effective_base_url,
-                llm_model=effective_model,
-                llm_api_key=effective_api_key,
+                llm_base_url=llm_base_url,
+                llm_model=llm_model,
+                llm_api_key=llm_api_key,
             )
 
         render.run(rover_path, diarize_path, cleaned_json, verbatim_path, cleaned_path if cleaned_json else None)
 
         if summary:
-            client = create_client(effective_base_url, effective_model, effective_api_key)
+            client = create_client(llm_base_url, llm_model, llm_api_key)
             if client.model:
                 summary_prompt = (
                     "Analyze this meeting transcript and provide:\n"
@@ -498,7 +490,7 @@ async def transcribe(
         "segments": segments_out,
         "azure": _to_azure_format(segments_out) if output_format == "azure" else None,
         "logs_tail": final_logs[-4000:],
-        "llm_base_url": effective_base_url,
+        "llm_base_url": llm_base_url,
     }
 
 

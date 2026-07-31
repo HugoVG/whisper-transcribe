@@ -2,6 +2,20 @@
 
 Self-hosted, GPU-accelerated speech-to-text with speaker diarization and LLM post-correction. Runs as a Docker API — POST audio, get back transcripts. No audio leaves your machine.
 
+## ⚠️ Vibe-coded
+
+I'm terrible in python and I saw the potentional of <https://github.com/steemandavid/whisper-transcribe> but it ran via a bash script. I only needed it to run as a docker container exposing an API so I could finally get rid of the azure speech service.
+My main problem with the Azure service was that it is expensive and the quality is not great for Dutch.
+
+My use case is transcribing Dutch and english audio from 3 - 60 mins long.
+
+| Implementation | Understands Dutch | Speaker Diarization | Word-level timestamps | Local |
+| ---------------- | ----------------- | -------------------- | ---------------------- | ------- |
+| [Azure Speech Service](https://azure.microsoft.com/en-us/services/cognitive-services/speech-services/) | ✅ | ✅ | ✅ | ❌ |
+| [OpenAI Whisper](https://openai.com/research/whisper) | ✅ | ❌ | ✅ | ❌ |
+| [whisperx](https://github.com/m-bain/whisperX) | ✅ | ❌ | ✅ | ✅ |
+| This project | ✅ | ✅ | ✅ | ✅ |
+
 ## Quick Start
 
 ```powershell
@@ -38,7 +52,7 @@ curl -X POST http://localhost:8000/transcribe `
 ### `POST /transcribe`
 
 | Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
+| ----------- | ------ | --------- | ------------- |
 | `file` | file | *(required)* | Audio file (mp3, m4a, wav, etc.) |
 | `quality` | string | `custom` | Preset: `fast`, `medium`, `good`, `perfect` |
 | `model` | string | `medium` | Override model: `tiny`, `base`, `small`, `medium`, `large-v3` |
@@ -62,7 +76,7 @@ curl -X POST http://localhost:8000/transcribe `
 ### Quality Presets
 
 | Preset | ASR Model | Enhance | Denoise | Ensemble | Correct |
-|--------|-----------|---------|---------|----------|---------|
+| -------- | ----------- | --------- | --------- | ---------- | --------- |
 | `fast` | small | ❌ | ❌ | ❌ | ❌ |
 | `medium` | medium | ❌ | ❌ | ❌ | ❌ |
 | `good` | **large-v3** | ❌ | ❌ | ❌ | ❌ |
@@ -94,6 +108,7 @@ Delete intermediate files for a completed job.
 ```
 
 With `format=azure`:
+
 ```json
 {
   "azure": [
@@ -108,14 +123,16 @@ With `format=azure`:
 The pipeline uses an LLM for three optional stages: auto-prompt, post-correction, and summary. Any OpenAI-compatible endpoint works:
 
 **Ollama (local):**
+
 ```powershell
 curl -F "file=@audio.mp3" -F "correct=true" `
-  -F "llm_base_url=http://host.docker.internal:11434" `
+  -F "llm_base_url=http://host.docker.internal:11434/v1" `
   -F "llm_model=qwen2.5:14b" `
   http://localhost:8000/transcribe
 ```
 
 **OpenAI:**
+
 ```powershell
 curl -F "file=@audio.mp3" -F "correct=true" `
   -F "llm_base_url=https://api.openai.com/v1" `
@@ -125,6 +142,7 @@ curl -F "file=@audio.mp3" -F "correct=true" `
 ```
 
 **Azure OpenAI:**
+
 ```powershell
 curl -F "file=@audio.mp3" -F "correct=true" `
   -F "llm_base_url=https://your-resource.openai.azure.com/openai/deployments/gpt-4o" `
@@ -137,7 +155,7 @@ URLs without `/v1` are treated as Ollama. URLs with `/v1` or an API key are trea
 ## Environment Variables
 
 | Variable | Default | Description |
-|----------|---------|-------------|
+| ---------- | --------- | ------------- |
 | `HF_TOKEN` | — | HuggingFace token for pyannote diarization models |
 | `LLM_BASE_URL` | — | Fallback LLM endpoint |
 | `OLLAMA_BASE_URL` | `http://host.docker.internal:11434` | Fallback Ollama URL |
