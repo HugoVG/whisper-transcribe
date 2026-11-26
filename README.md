@@ -38,6 +38,7 @@ curl -X POST http://localhost:8000/transcribe `
 ## Features
 
 - **REST API** — POST audio, get back JSON with segments, speakers, timestamps, confidence
+- **OpenAI-compatible API** — `POST /v1/audio/transcriptions` (batch) and `WS /live-transcript` (Realtime-style live VAD + diarization + STT, nl/en)
 - **Speaker diarization** — identifies who said what (pyannote 4.x)
 - **Word-level timestamps** — precise alignment via wav2vec2
 - **Multiple LLM backends** — Ollama, OpenAI, Azure OpenAI, any OpenAI-compatible endpoint
@@ -186,6 +187,104 @@ volumes:
 ```
 
 The `whisper-hf-cache` volume persists downloaded HuggingFace models across restarts. First run downloads ~3 GB of models (one-time cost).
+
+## OpenAI-compatible API
+
+The server speaks the OpenAI transcription surface — batch over HTTP, live over
+WebSocket. Everything else (voice commands, per-sentence agent, entity
+reactions) runs **client-side** on the transcript events.
+
+### Batch: `POST /v1/audio/transcriptions`
+
+Standard OpenAI multipart fields: `file` (required), `model` (default
+`whisper-1`), `language`, `prompt`, `response_format`
+(`json` | `text` | `verbose_json` | `srt` | `vtt`), `temperature`,
+`timestamp_granularities[]` (`word` and/or `segment`).
+Extensions: `quality` (`fast`/`medium`/`good`/`perfect`), `speakers` (pin
+diarization count). `verbose_json` segments carry `speaker` and `avg_logprob`
+extensions plus word-level timestamps when `timestamp_granularities[]=word`.
+
+```bash
+# POST http://localhost:8000/v1/audio/transcriptions with multipart form:
+#   file=@recording.mp3, model=whisper-1, language=nl,
+#   response_format=verbose_json, timestamp_granularities[]=word
+```
+
+`json` (default) returns `{"text": "..."}`; `verbose_json` returns
+`{"task", "language", "duration", "text", "segments": [...], "words": [...]}`.
+
+The original custom `POST /transcribe` endpoint is unchanged.
+
+### Live: `WS /live-transcript`
+
+OpenAI Realtime-style events. Audio in = base64 PCM16, 16 kHz, mono.
+
+Client -> server (JSON text frames; binary frames are accepted as raw PCM16):
+
+| Event | Payload |
+| ----- | ------- |
+| `session.update` | `session.input_audio_transcription` (`model`, `language`, `prompt`), `session.turn_detection.silence_duration_ms` (maps to VAD hangover) |
+| `input_audio_buffer.append` | `audio`: base64 PCM16 chunk |
+| `input_audio_buffer.commit` | finalize the current speech turn now |
+| `input_audio_buffer.clear` | drop buffered, uncommitted audio |
+| `ping` | `{"type":"ping","ping":{"value":123}}` -> `pong` |
+
+Server -> client:
+
+| Event | Payload |
+| ----- | ------- |
+| `session.created` / `session.updated` | `session` object (`id`, `model`, effective `input_audio_transcription`, `turn_detection`) |
+| `input_audio_buffer.speech_started` | `audio_start_ms`, `item_id` |
+| `input_audio_buffer.speech_stopped` | `audio_end_ms` |
+| `input_audio_buffer.committed` / `cleared` | `item_id` |
+| `conversation.item.input_audio_transcribed` | `item_id`, `transcript`, `language`, `segments`: `[{start, end, text, speaker, avg_logprob, words}]` |
+| `pong` / `error` | `value` / `error.type`, `error.message` |
+
+Every frame has `type` + `event_id`. Speaker labels (`SPEAKER_01`...) come from
+online diarization; timestamps are seconds relative to stream start.
+
+```csharp
+var ws = new ClientWebSocket();
+await ws.ConnectAsync(new Uri("ws://localhost:8000/live-transcript"), default);
+await ws.SendAsync(Encoding.UTF8.GetBytes("""{"type":"session.update","session":{
+    "input_audio_transcription":{"model":"whisper-1","language":"nl"},
+    "turn_detection":{"type":"server_vad","silence_duration_ms":800}}}"""),
+    WebSocketMessageType.Text, true, default);
+
+// stream 16 kHz mono PCM16 (ffmpeg -i call.mp3 -ar 16000 -ac 1 -f s16le call.pcm)
+var buf = new byte[960]; // 30 ms
+var send = Task.Run(async () => {
+    using var fs = File.OpenRead("call.pcm");
+    int n;
+    while ((n = await fs.ReadAsync(buf)) > 0)
+        await ws.SendAsync(new ArraySegment<byte>(buf, 0, n),
+            WebSocketMessageType.Binary, true, default);
+});
+
+var recv = new byte[64 * 1024];
+while (ws.State == WebSocketState.Open)
+{
+    var sb = new StringBuilder();
+    WebSocketReceiveResult r;
+    do {
+        r = await ws.ReceiveAsync(new ArraySegment<byte>(recv), default);
+        if (r.MessageType == WebSocketMessageType.Close) break;
+        sb.Append(Encoding.UTF8.GetString(recv, 0, r.Count));
+    } while (!r.EndOfMessage);
+    var ev = JsonDocument.Parse(sb.ToString()).RootElement;
+    switch (ev.GetProperty("type").GetString())
+    {
+        case "conversation.item.input_audio_transcribed":
+            var seg = ev.GetProperty("segments")[0];
+            Console.WriteLine($"[{seg.GetProperty("speaker")}] {seg.GetProperty("text")}");
+            // -> run your client-side agent / commands / entity extraction here
+            break;
+        case "input_audio_buffer.speech_started":
+            Console.WriteLine($"speech @ {ev.GetProperty("audio_start_ms")} ms"); break;
+    }
+}
+await send;
+```
 
 ## CLI Mode
 
