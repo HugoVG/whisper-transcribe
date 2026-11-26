@@ -38,6 +38,7 @@ curl -X POST http://localhost:8000/transcribe `
 ## Features
 
 - **REST API** — POST audio, get back JSON with segments, speakers, timestamps, confidence
+- **Real-time WebSocket API** — stream PCM audio, get live VAD + diarization + STT events (nl/en) with entity extraction (`/ws/stream`)
 - **Speaker diarization** — identifies who said what (pyannote 4.x)
 - **Word-level timestamps** — precise alignment via wav2vec2
 - **Multiple LLM backends** — Ollama, OpenAI, Azure OpenAI, any OpenAI-compatible endpoint
@@ -186,6 +187,93 @@ volumes:
 ```
 
 The `whisper-hf-cache` volume persists downloaded HuggingFace models across restarts. First run downloads ~3 GB of models (one-time cost).
+
+## Real-time Streaming API (VAD + diarization + STT over WebSocket)
+
+For live support calls: stream PCM audio in, get back live events with speaker
+labels, timestamps, partial transcripts, and extracted context entities
+(ticket numbers, device numbers, dates) in Dutch and English.
+
+```
+ws://localhost:8000/ws/stream
+```
+
+### Protocol
+
+Client → server:
+
+| Message | Description |
+| ------- | ----------- |
+| `{"type": "start", "config": {...}}` | Optional; starts a session (query params are the defaults) |
+| binary frame | PCM16 LE, mono, 16 kHz audio chunk |
+| `{"type": "end"}` | Finish the session (also triggered on disconnect) |
+| `{"type": "ping"}` | Server replies `{"type": "pong"}` |
+
+Server → client (all JSON, each with a `type`):
+
+| Event | Payload |
+| ----- | ------- |
+| `ready` | `session_id`, resolved `config` |
+| `speech_start` / `speech_end` | `start`, `end`, `duration` (seconds) |
+| `partial` | live `text`, `lang`, `start`, `end` while someone is still talking |
+| `segment` | final `id`, `start`, `end`, `speaker` (`SPEAKER_01`…), `lang` (nl/en auto), `text`, `confidence`, `words` (word-level timestamps) |
+| `entity` | `entity_type` (`ticket_number`, `device_number`, `date`, `email`, `phone_number`, `number`), `value`, `raw`, `segment_id`; `updated: true` when spoken digits are merged into an open ticket number |
+| `session_end` | full `segments`, `entities`, and `verbatim_text` in the same `[SPEAKER_01]` format as the batch API |
+
+Config keys (query param or `start.config`): `language`, `diarize`, `entities`,
+`vad` (`auto`/`silero`/`energy`), `hangover_s`, `min_speech_s`, `max_speech_s`,
+`partial_interval_s`, `partial_window_s`, `prompt`, `beam_size`,
+`speaker_threshold`, `min_speakers`, `max_speakers`, `ticket_window_s`.
+
+`GET /realtime/health` reports which backends are active (silero vs energy VAD,
+pyannote diarization, ASR model).
+
+### How it works
+
+```
+WS PCM16 chunks
+  │
+  ▼
+Streaming VAD (silero if available, else adaptive energy VAD)
+  - speech_start / speech_end with hangover + min-speech filtering
+  │
+  ▼
+On speech end: faster-whisper segment transcription (language auto nl/en,
+word-level timestamps)  +  online diarization (pyannote embeddings matched
+against running speaker centroids, cosine threshold)
+  │
+  ▼
+Entity extraction on each segment (spoken digits → ticket numbers,
+NL012345-style device numbers, Dutch/English dates, emails, phones)
+  │
+  ▼
+segment + entity events  →  session_end with verbatim transcript
+```
+
+Example client:
+
+```python
+import asyncio, json, websockets
+
+async def main():
+    async with websockets.connect("ws://localhost:8000/ws/stream?diarize=true") as ws:
+        await ws.send(json.dumps({"type": "start", "config": {"language": None}}))
+        # stream 16 kHz mono PCM16 chunks from your audio source:
+        # await ws.send(chunk)
+        await ws.send(json.dumps({"type": "end"}))
+        async for msg in ws:
+            ev = json.loads(msg)
+            if ev["type"] == "segment":
+                print(f"[{ev['speaker']}] {ev['text']}")
+            elif ev["type"] == "entity":
+                print(f"  -> {ev['entity_type']}: {ev['value']}")
+
+asyncio.run(main())
+```
+
+Env vars: `REALTIME_VAD`, `REALTIME_ASR_MODEL` (default
+`$WHISPER_MODEL_DIR/large-v3`), `REALTIME_EMBED_MODEL` (default
+`pyannote/embedding`), `REALTIME_DEVICE`, plus `HF_TOKEN` for diarization.
 
 ## CLI Mode
 

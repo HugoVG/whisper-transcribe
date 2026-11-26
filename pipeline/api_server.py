@@ -14,8 +14,10 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from . import asr_engines, diarize, postcorrect, preprocess, prompt_builder, render, rover
 from .glossary import Glossary
 from .llm import LLMClient, create_client
+from .realtime.server import router as realtime_router
 
-app = FastAPI(title="Whisper Transcribe API", version="1.0")
+app = FastAPI(title="Whisper Transcribe API", version="1.1")
+app.include_router(realtime_router)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 WORK_ROOT = Path(os.environ.get("TRANSCRIBE_API_WORKDIR", Path(tempfile.gettempdir()) / "whisper-transcribe-api"))
