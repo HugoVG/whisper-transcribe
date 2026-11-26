@@ -9,11 +9,12 @@ import uuid
 from pathlib import Path
 from urllib import request
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Response, UploadFile
 
 from . import asr_engines, diarize, postcorrect, preprocess, prompt_builder, render, rover
 from .glossary import Glossary
 from .llm import LLMClient, create_client
+from .openai_format import format_response
 from .realtime.server import router as realtime_router
 
 app = FastAPI(title="Whisper Transcribe API", version="1.1")
@@ -78,6 +79,7 @@ def _build_segments_output(rover_path: Path, diarize_path: Path, cleaned_path: P
 
     segments = rover_data.get("segments", [])
     turns = diarize_data.get("turns", [])
+    flat_words = rover_data.get("words", []) or []
 
     # Assign speakers to segments (same logic as render._assign_speakers)
     if turns:
@@ -103,6 +105,14 @@ def _build_segments_output(rover_path: Path, diarize_path: Path, cleaned_path: P
     source = cleaned_data.get("segments", segments) if cleaned_data else segments
     seg_map = {s["id"]: s for s in source}
 
+    # attach flattened word timestamps to their segment by time overlap
+    for w in flat_words:
+        ws = w.get("start", 0.0)
+        for seg in segments:
+            if seg.get("start", 0.0) <= ws <= seg.get("end", 0.0):
+                seg.setdefault("words", []).append(w)
+                break
+
     result = []
     for seg in segments:
         sid = seg.get("id", 0)
@@ -115,6 +125,7 @@ def _build_segments_output(rover_path: Path, diarize_path: Path, cleaned_path: P
             "lang": seg.get("lang", ""),
             "text": src.get("text", "").strip(),
             "confidence": round(seg.get("avg_logprob", 0), 3),
+            "words": seg.get("words", []),
         })
 
     return result
@@ -494,6 +505,39 @@ async def transcribe(
         "logs_tail": final_logs[-4000:],
         "llm_base_url": llm_base_url,
     }
+
+
+@app.post("/v1/audio/transcriptions")
+async def openai_transcriptions(
+    file: UploadFile = File(...),
+    model: str = Form(default="whisper-1"),
+    language: str | None = Form(default=None),
+    prompt: str | None = Form(default=None),
+    response_format: str = Form(default="json"),
+    temperature: float = Form(default=0.0),
+    timestamp_granularities: list[str] | None = Form(default=None, alias="timestamp_granularities[]"),
+    timestamp_granularities_plain: list[str] | None = Form(default=None, alias="timestamp_granularities"),
+    quality: str | None = Form(default=None),
+    speakers: int | None = Form(default=None),
+) -> Response:
+    """OpenAI-compatible batch transcription (POST /v1/audio/transcriptions).
+
+    Standard fields: file, model, language, prompt, response_format
+    (json|text|verbose_json|srt|vtt), temperature, timestamp_granularities[].
+    Extensions: quality (fast|medium|good|perfect), speakers (pin diarization).
+    verbose_json segments carry `speaker` and `avg_logprob` extensions.
+    """
+    gran = set(timestamp_granularities or []) | set(timestamp_granularities_plain or [])
+    result = await transcribe(
+        file=file,
+        quality=quality or "good",
+        model=None if model in (None, "", "whisper-1") else model,
+        language=language,
+        prompt_text=prompt,
+        speakers=speakers,
+    )
+    body, media_type = format_response(result, response_format, include_words=("word" in gran))
+    return Response(content=body, media_type=media_type)
 
 
 @app.post("/jobs/{job_id}/cleanup")

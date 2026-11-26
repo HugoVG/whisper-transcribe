@@ -100,7 +100,11 @@ class RealtimeSession:
                 self._collecting = True
                 self._speech_start = ev.time
                 self._last_partial = ev.time
-                events.append({"type": "speech_start", "start": round(ev.time, 3)})
+                events.append({
+                    "type": "speech_start",
+                    "start": round(ev.time, 3),
+                    "item_id": f"item_{self._segment_seq:04d}",
+                })
             elif ev.kind == "speech_end":
                 events.append({
                     "type": "speech_end",
@@ -117,10 +121,8 @@ class RealtimeSession:
             events.extend(self._maybe_partial())
         return events
 
-    def end(self) -> list[dict]:
-        if self._ended:
-            return []
-        self._ended = True
+    def commit(self) -> list[dict]:
+        """Force-finalize any ongoing speech (OpenAI input_audio_buffer.commit)."""
         events: list[dict] = []
         for ev in self.vad.flush():
             if ev.kind == "speech_end" and self._collecting:
@@ -133,6 +135,20 @@ class RealtimeSession:
                 })
                 events.extend(self._finalize_segment(self._pending, self._speech_start, ev.time, ev.duration))
                 self._pending = []
+        return events
+
+    def clear_pending(self) -> None:
+        """Drop buffered but uncommitted audio (input_audio_buffer.clear)."""
+        self._pending = []
+        if self._collecting:
+            self.vad.flush()
+            self._collecting = False
+
+    def end(self) -> list[dict]:
+        if self._ended:
+            return []
+        self._ended = True
+        events = self.commit()
         duration = self._total_samples / self.config.sample_rate
         events.append({
             "type": "session_end",

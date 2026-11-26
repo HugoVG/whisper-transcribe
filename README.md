@@ -38,7 +38,7 @@ curl -X POST http://localhost:8000/transcribe `
 ## Features
 
 - **REST API** — POST audio, get back JSON with segments, speakers, timestamps, confidence
-- **Real-time WebSocket API** — stream PCM audio, get live VAD + diarization + STT events (nl/en) with entity extraction (`/ws/stream`)
+- **OpenAI-compatible API** — `POST /v1/audio/transcriptions` (batch) and `WS /live-transcript` (Realtime-style live VAD + diarization + STT, nl/en)
 - **Speaker diarization** — identifies who said what (pyannote 4.x)
 - **Word-level timestamps** — precise alignment via wav2vec2
 - **Multiple LLM backends** — Ollama, OpenAI, Azure OpenAI, any OpenAI-compatible endpoint
@@ -188,92 +188,103 @@ volumes:
 
 The `whisper-hf-cache` volume persists downloaded HuggingFace models across restarts. First run downloads ~3 GB of models (one-time cost).
 
-## Real-time Streaming API (VAD + diarization + STT over WebSocket)
+## OpenAI-compatible API
 
-For live support calls: stream PCM audio in, get back live events with speaker
-labels, timestamps, partial transcripts, and extracted context entities
-(ticket numbers, device numbers, dates) in Dutch and English.
+The server speaks the OpenAI transcription surface — batch over HTTP, live over
+WebSocket. Everything else (voice commands, per-sentence agent, entity
+reactions) runs **client-side** on the transcript events.
 
+### Batch: `POST /v1/audio/transcriptions`
+
+Standard OpenAI multipart fields: `file` (required), `model` (default
+`whisper-1`), `language`, `prompt`, `response_format`
+(`json` | `text` | `verbose_json` | `srt` | `vtt`), `temperature`,
+`timestamp_granularities[]` (`word` and/or `segment`).
+Extensions: `quality` (`fast`/`medium`/`good`/`perfect`), `speakers` (pin
+diarization count). `verbose_json` segments carry `speaker` and `avg_logprob`
+extensions plus word-level timestamps when `timestamp_granularities[]=word`.
+
+```bash
+# POST http://localhost:8000/v1/audio/transcriptions with multipart form:
+#   file=@recording.mp3, model=whisper-1, language=nl,
+#   response_format=verbose_json, timestamp_granularities[]=word
 ```
-ws://localhost:8000/ws/stream
-```
 
-### Protocol
+`json` (default) returns `{"text": "..."}`; `verbose_json` returns
+`{"task", "language", "duration", "text", "segments": [...], "words": [...]}`.
 
-Client → server:
+The original custom `POST /transcribe` endpoint is unchanged.
 
-| Message | Description |
-| ------- | ----------- |
-| `{"type": "start", "config": {...}}` | Optional; starts a session (query params are the defaults) |
-| binary frame | PCM16 LE, mono, 16 kHz audio chunk |
-| `{"type": "end"}` | Finish the session (also triggered on disconnect) |
-| `{"type": "ping"}` | Server replies `{"type": "pong"}` |
+### Live: `WS /live-transcript`
 
-Server → client (all JSON, each with a `type`):
+OpenAI Realtime-style events. Audio in = base64 PCM16, 16 kHz, mono.
+
+Client -> server (JSON text frames; binary frames are accepted as raw PCM16):
 
 | Event | Payload |
 | ----- | ------- |
-| `ready` | `session_id`, resolved `config` |
-| `speech_start` / `speech_end` | `start`, `end`, `duration` (seconds) |
-| `partial` | live `text`, `lang`, `start`, `end` while someone is still talking |
-| `segment` | final `id`, `start`, `end`, `speaker` (`SPEAKER_01`…), `lang` (nl/en auto), `text`, `confidence`, `words` (word-level timestamps) |
-| `entity` | `entity_type` (`ticket_number`, `device_number`, `date`, `email`, `phone_number`, `number`), `value`, `raw`, `segment_id`; `updated: true` when spoken digits are merged into an open ticket number |
-| `session_end` | full `segments`, `entities`, and `verbatim_text` in the same `[SPEAKER_01]` format as the batch API |
+| `session.update` | `session.input_audio_transcription` (`model`, `language`, `prompt`), `session.turn_detection.silence_duration_ms` (maps to VAD hangover) |
+| `input_audio_buffer.append` | `audio`: base64 PCM16 chunk |
+| `input_audio_buffer.commit` | finalize the current speech turn now |
+| `input_audio_buffer.clear` | drop buffered, uncommitted audio |
+| `ping` | `{"type":"ping","ping":{"value":123}}` -> `pong` |
 
-Config keys (query param or `start.config`): `language`, `diarize`, `entities`,
-`vad` (`auto`/`silero`/`energy`), `hangover_s`, `min_speech_s`, `max_speech_s`,
-`partial_interval_s`, `partial_window_s`, `prompt`, `beam_size`,
-`speaker_threshold`, `min_speakers`, `max_speakers`, `ticket_window_s`.
+Server -> client:
 
-`GET /realtime/health` reports which backends are active (silero vs energy VAD,
-pyannote diarization, ASR model).
+| Event | Payload |
+| ----- | ------- |
+| `session.created` / `session.updated` | `session` object (`id`, `model`, effective `input_audio_transcription`, `turn_detection`) |
+| `input_audio_buffer.speech_started` | `audio_start_ms`, `item_id` |
+| `input_audio_buffer.speech_stopped` | `audio_end_ms` |
+| `input_audio_buffer.committed` / `cleared` | `item_id` |
+| `conversation.item.input_audio_transcribed` | `item_id`, `transcript`, `language`, `segments`: `[{start, end, text, speaker, avg_logprob, words}]` |
+| `pong` / `error` | `value` / `error.type`, `error.message` |
 
-### How it works
+Every frame has `type` + `event_id`. Speaker labels (`SPEAKER_01`...) come from
+online diarization; timestamps are seconds relative to stream start.
 
+```csharp
+var ws = new ClientWebSocket();
+await ws.ConnectAsync(new Uri("ws://localhost:8000/live-transcript"), default);
+await ws.SendAsync(Encoding.UTF8.GetBytes("""{"type":"session.update","session":{
+    "input_audio_transcription":{"model":"whisper-1","language":"nl"},
+    "turn_detection":{"type":"server_vad","silence_duration_ms":800}}}"""),
+    WebSocketMessageType.Text, true, default);
+
+// stream 16 kHz mono PCM16 (ffmpeg -i call.mp3 -ar 16000 -ac 1 -f s16le call.pcm)
+var buf = new byte[960]; // 30 ms
+var send = Task.Run(async () => {
+    using var fs = File.OpenRead("call.pcm");
+    int n;
+    while ((n = await fs.ReadAsync(buf)) > 0)
+        await ws.SendAsync(new ArraySegment<byte>(buf, 0, n),
+            WebSocketMessageType.Binary, true, default);
+});
+
+var recv = new byte[64 * 1024];
+while (ws.State == WebSocketState.Open)
+{
+    var sb = new StringBuilder();
+    WebSocketReceiveResult r;
+    do {
+        r = await ws.ReceiveAsync(new ArraySegment<byte>(recv), default);
+        if (r.MessageType == WebSocketMessageType.Close) break;
+        sb.Append(Encoding.UTF8.GetString(recv, 0, r.Count));
+    } while (!r.EndOfMessage);
+    var ev = JsonDocument.Parse(sb.ToString()).RootElement;
+    switch (ev.GetProperty("type").GetString())
+    {
+        case "conversation.item.input_audio_transcribed":
+            var seg = ev.GetProperty("segments")[0];
+            Console.WriteLine($"[{seg.GetProperty("speaker")}] {seg.GetProperty("text")}");
+            // -> run your client-side agent / commands / entity extraction here
+            break;
+        case "input_audio_buffer.speech_started":
+            Console.WriteLine($"speech @ {ev.GetProperty("audio_start_ms")} ms"); break;
+    }
+}
+await send;
 ```
-WS PCM16 chunks
-  │
-  ▼
-Streaming VAD (silero if available, else adaptive energy VAD)
-  - speech_start / speech_end with hangover + min-speech filtering
-  │
-  ▼
-On speech end: faster-whisper segment transcription (language auto nl/en,
-word-level timestamps)  +  online diarization (pyannote embeddings matched
-against running speaker centroids, cosine threshold)
-  │
-  ▼
-Entity extraction on each segment (spoken digits → ticket numbers,
-NL012345-style device numbers, Dutch/English dates, emails, phones)
-  │
-  ▼
-segment + entity events  →  session_end with verbatim transcript
-```
-
-Example client:
-
-```python
-import asyncio, json, websockets
-
-async def main():
-    async with websockets.connect("ws://localhost:8000/ws/stream?diarize=true") as ws:
-        await ws.send(json.dumps({"type": "start", "config": {"language": None}}))
-        # stream 16 kHz mono PCM16 chunks from your audio source:
-        # await ws.send(chunk)
-        await ws.send(json.dumps({"type": "end"}))
-        async for msg in ws:
-            ev = json.loads(msg)
-            if ev["type"] == "segment":
-                print(f"[{ev['speaker']}] {ev['text']}")
-            elif ev["type"] == "entity":
-                print(f"  -> {ev['entity_type']}: {ev['value']}")
-
-asyncio.run(main())
-```
-
-Env vars: `REALTIME_VAD`, `REALTIME_ASR_MODEL` (default
-`$WHISPER_MODEL_DIR/large-v3`), `REALTIME_EMBED_MODEL` (default
-`pyannote/embedding`), `REALTIME_DEVICE`, plus `HF_TOKEN` for diarization.
 
 ## CLI Mode
 

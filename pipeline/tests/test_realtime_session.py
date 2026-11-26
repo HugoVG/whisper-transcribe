@@ -140,6 +140,31 @@ class TestSessionFlow(unittest.TestCase):
         events = s.feed_audio(silence(0.1))
         self.assertEqual(events[0]["type"], "error")
 
+    def test_commit_finalizes_ongoing_speech(self):
+        s = make_session(["hallo daar"])
+        events = feed(s, sine(1.0))  # still speaking, no silence yet
+        self.assertEqual([e for e in events if e["type"] == "segment"], [])
+        events = s.commit()  # input_audio_buffer.commit
+        segments = [e for e in events if e["type"] == "segment"]
+        self.assertEqual(len(segments), 1)
+        self.assertEqual(segments[0]["text"], "hallo daar")
+        self.assertIn("speech_end", [e["type"] for e in events])
+
+    def test_clear_pending_drops_audio(self):
+        s = make_session(["dit wordt gewist"])
+        feed(s, sine(1.0))
+        s.clear_pending()
+        events = s.commit()
+        self.assertEqual([e for e in events if e["type"] == "segment"], [])
+
+    def test_speech_start_carries_item_id(self):
+        s = make_session(["hoi"])
+        events = feed(s, sine(0.8) + silence(0.4))
+        starts = [e for e in events if e["type"] == "speech_start"]
+        segments = [e for e in events if e["type"] == "segment"]
+        self.assertTrue(starts and starts[0]["item_id"].startswith("item_"))
+        self.assertEqual(starts[0]["item_id"], f"item_{segments[0]['id']:04d}")
+
 
 if __name__ == "__main__":
     unittest.main()
